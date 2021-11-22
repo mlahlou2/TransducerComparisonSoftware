@@ -13,6 +13,7 @@ import tkinter.filedialog as filedialog
 import tkinter.simpledialog as sdialog
 import tkinter.messagebox as msgbox
 import pandas as pd
+import scipy.stats as stats
 
 import redpitaya_scpi as rp
 from matplotlib.backends.backend_pdf import PdfPages
@@ -25,6 +26,8 @@ import numpy as np
 import os.path
 import datetime
 import fpdf
+
+from hyd_calibration import hyd_calibration_multiple_freq
 
 # Writing to an excel
 # sheet using Python
@@ -65,7 +68,10 @@ class VoltSweepGUI:
         self.integer_entrybox = Entry(self.frame, textvariable=self.integer_entry_state).grid(row=3,
                                                                                         column=3, padx=20, columnspan=1)
         self.integer_Label = Label(self.frame, text=integer_entry_text).grid(row=3, column=4, padx=20, columnspan=1)
-
+        self.b3 = Button(self.frame, text="Compare A Group of Transducers Beamprofiles", command=self.comparealltransducers_beamprofile).grid(row=4,
+                                                                                        column=1, padx=20, columnspan=2)
+        self.b4 = Button(self.frame, text="Compare A Group of Transducers Info", command=self.comparealltransducers_All).grid(row=5,
+                                                                                        column=1, padx=20, columnspan=2)
 
     def vnoamp(self, keypressures, vs):
         # calculating the voltage needed for the pnp values desired
@@ -123,6 +129,13 @@ class VoltSweepGUI:
         if vs.amplify == 0:
             vs.amplify = float(sdialog.askstring('Amplification', 'Amplification is set to 0 dB. Please enter amplification in dB'))
         return vs, fs, bp, vs_file, fs_file, bp_file
+
+    def loadbpfiles(self, freq_data, beam_data, vs, fs, bp, vs_file, fs_file, bp_file):
+        if beam_data == True:
+            if bp_file == '':
+                bp_file = filedialog.askopenfilename(title='Select Beam Profile File')
+            bp.load(bp_file)
+        return bp, bp_file
 
     def plot_transducer_scatter(self, workbook_ID, transducer_ID_sheet_name, vs_file_current, fs_file_current, vs_file_prev, fs_file_prev):
         ##############################################################################
@@ -443,21 +456,8 @@ class VoltSweepGUI:
         Spreadsheet_Name = ('MutliTransducerComparisonFor' +str(self.integer_entry_state.get()) + '.xlsx')
         # Workbook is created
         excel_spreadsheet_writer = pd.ExcelWriter(Spreadsheet_Name, engine='xlsxwriter')
-        # wb = Workbook()
-        # # add_sheet is used to create sheet.
-        # # sheet1 = wb.add_sheet('Sheet 1')
-
-        # Create Empty PDF to write into
-        # pdf = fpdf.FPDF()
-        # add_page is usded to create sheet
-        # pdf.add_page()
-        # pdf.set_font('Arial', '', 12)
-        # if (vs_current.txdr == ''):
-        #     vs_current.txdr = sdialog.askstring('Transducer Name', 'Please enter transducer name')
 
         collabels = ['Transducer', 'Current Measurement Date', 'Previous Measurement Date', 'Vamp (Vpp)', 'Cur PNP(MPa)', 'Prev PNP(MPa)', "% Change"]
-        # for i, j in zip(collabels, range(len(collabels))):
-        #     sheet1.write(0, j, i)
 
         TransducerData = pd.DataFrame([], columns=collabels)
 
@@ -524,6 +524,222 @@ class VoltSweepGUI:
 
         # Saves the Transducers data to the excel spreadsheet
         print(TransducerData)
+
+        TransducerData.to_excel(excel_spreadsheet_writer, sheet_name='All Transducer Data', index=False)
+        excel_spreadsheet_writer.save()
+
+        ## Saves the pdf created and closes it out
+        # pdfname = 'C:/Users/SoundPipe/Desktop/MutliTransducerComparisonFor' + str(current_date) + '.pdf'
+        # self.closout_pdf(pdf, pdfname, plt)
+
+        print("compare all transducers")
+
+    def comparealltransducers_beamprofile(self, vs_current_file='', fs_current_file='',bp_current_file='',  vs_previous_file='', fs_previous_file='',bp_previous_file='', transducername= '',freq_data= True, beam_data=True):
+
+        '''Generates a pdf report from voltsweep, freqsweep and beam profile data
+            INPUTS:
+                vs_file: voltsweep data file path, string (if no path is provided user will be prompted to select file from directory)
+                fs_file: freqsweep data file path, string (if no path is provided user will be prompted to select file from directory)
+                bp_file: beamprofile data file path  string (if no path is provided user will be prompted to select file from directory)
+                pdfname: path of pdf to be saved, string (if no path is provided user will be prompted to select save location and name)
+                freq_data: boolean, if True, the user has freq sweep data to be included in the report, if False no freq sweep
+                           data will be included in the report
+                beam_data: boolean, if True, the user has beam profile data to be included in the report, if False no beam profile
+                           data will be included in the report
+            OUTPUT:
+                excel document saved as directed by user
+                '''
+
+        pd.set_option("display.max_rows", None, "display.max_columns", None)
+        if self.integer_entry_state.get() == 0:
+            print('0 is not a valid entry')
+            return
+
+        # Spreadsheet_Name = ('C:/Users/SoundPipe/Desktop/MutliTransducerComparisonFor' +str(self.integer_entry_state.get()) + '.xlsx')
+        Spreadsheet_Name = ('MutliTransducerComparisonFor' +str(self.integer_entry_state.get()) + '.xlsx')
+        # Workbook is created
+        excel_spreadsheet_writer = pd.ExcelWriter(Spreadsheet_Name, engine='xlsxwriter')
+
+        collabels = ['Transducer', 'Current Measurement Date', 'COV', 'degrees of beamprofile > 75% max pressure', 'average for > 75%', 'degrees of beamprofile > 50% max pressure', 'average for > 50%', 'Total Power Normalized']
+        # for i, j in zip(collabels, range(len(collabels))):
+        #     sheet1.write(0, j, i)
+
+        TransducerData = pd.DataFrame([], columns=collabels)
+
+        for i in range(1, self.integer_entry_state.get()+1):
+
+            # creating objects
+            vs_current = hyd.VoltSweep()
+            fs_current = hyd.FreqSweep()
+            bp_current = hyd.BeamProfile()
+            vs_current_file = ''
+            fs_current_file = ''
+            bp_current_file = ''
+
+            # Loading Current Transducer Calibration Data
+            [bp_current, bp_current_file] = self.loadbpfiles(
+                freq_data, beam_data, vs_current, fs_current, bp_current, vs_current_file, fs_current_file,
+                bp_current_file)
+
+            ### Voltage Table Creation ###
+            # collects the transducers number from the current voltsweep data
+            # if transducername == '':
+            transducername = bp_current.txdr
+
+            current_date = self.get_time_of_measurements(bp_current_file)
+
+
+
+            bp_current_PNP = []
+            for i in bp_current.hydoutput:
+                bp_current_PNP.append(-min(i))
+
+            COV = stats.variation(bp_current_PNP)
+            TotalPower = sum(bp_current_PNP)
+            bp_current_normalized = bp_current_PNP/max(bp_current_PNP)
+            TotalPowerNormalized = sum(bp_current_normalized)
+            average_output_nornalized = np.mean(bp_current_normalized)
+            print(average_output_nornalized)
+            high_pressure_75 = []
+            high_pressure_50 = []
+            low_pressure = []
+            for i in bp_current_normalized:
+                if i >= 0.75:
+                    high_pressure_75.append(i)
+                    high_pressure_50.append(i)
+                elif i >= 0.5:
+                    high_pressure_50.append(i)
+                else:
+                    low_pressure.append(i)
+
+            degrees_above_threequarters = len(high_pressure_75)
+            degrees_above_half = len(high_pressure_50)
+            average_output_above_threequarters_normalized = np.mean(high_pressure_75)
+            average_output_above_half_normalized = np.mean(high_pressure_50)
+            table_PNP = [transducername, str(current_date), COV, degrees_above_threequarters, average_output_above_threequarters_normalized, degrees_above_half, average_output_above_half_normalized, TotalPowerNormalized]
+
+            numpy_Table_PNP = np.array(table_PNP)
+            table_PNPTransducerData = pd.DataFrame(numpy_Table_PNP.reshape(1, -1), columns=list(TransducerData))
+            TransducerData = TransducerData.append(table_PNPTransducerData)
+
+        # Saves the Transducers data to the excel spreadsheet
+        print(TransducerData)
+
+        TransducerData.to_excel(excel_spreadsheet_writer, sheet_name='All Transducer Data', index=False)
+        excel_spreadsheet_writer.save()
+
+        ## Saves the pdf created and closes it out
+        # pdfname = 'C:/Users/SoundPipe/Desktop/MutliTransducerComparisonFor' + str(current_date) + '.pdf'
+        # self.closout_pdf(pdf, pdfname, plt)
+
+        print("compare all transducers")
+
+    def comparealltransducers_All(self, vs_current_file='', fs_current_file='', bp_current_file='',
+                                          vs_previous_file='', fs_previous_file='', bp_previous_file='',
+                                          transducername='', freq_data=True, beam_data=True):
+
+        '''Generates a pdf report from voltsweep, freqsweep and beam profile data
+            INPUTS:
+                vs_file: voltsweep data file path, string (if no path is provided user will be prompted to select file from directory)
+                fs_file: freqsweep data file path, string (if no path is provided user will be prompted to select file from directory)
+                bp_file: beamprofile data file path  string (if no path is provided user will be prompted to select file from directory)
+                pdfname: path of pdf to be saved, string (if no path is provided user will be prompted to select save location and name)
+                freq_data: boolean, if True, the user has freq sweep data to be included in the report, if False no freq sweep
+                           data will be included in the report
+                beam_data: boolean, if True, the user has beam profile data to be included in the report, if False no beam profile
+                           data will be included in the report
+            OUTPUT:
+                excel document saved as directed by user
+                '''
+
+        pd.set_option("display.max_rows", None, "display.max_columns", None)
+        if self.integer_entry_state.get() == 0:
+            print('0 is not a valid entry')
+            return
+
+        # Spreadsheet_Name = ('C:/Users/SoundPipe/Desktop/MutliTransducerComparisonFor' +str(self.integer_entry_state.get()) + '.xlsx')
+        Spreadsheet_Name = ('MutliTransducerComparisonFor' + str(self.integer_entry_state.get()) + '.xlsx')
+        # Workbook is created
+        excel_spreadsheet_writer = pd.ExcelWriter(Spreadsheet_Name, engine='xlsxwriter')
+
+        collabels = ['Transducer', 'Current Measurement Date', 'Vamp (Vpp)', 'Cur PNP(MPa)', 'Peak Frequency', 'COV', 'degrees of beamprofile > 75% max pressure',
+                     'average for > 75%', 'degrees of beamprofile > 50% max pressure', 'average for > 50%', 'Total Power of Transducer']
+
+        TransducerData = pd.DataFrame([], columns=collabels)
+
+        for i in range(1, self.integer_entry_state.get() + 1):
+
+            # creating objects
+            vs_current = hyd.VoltSweep()
+            fs_current = hyd.FreqSweep()
+            bp_current = hyd.BeamProfile()
+            vs_current_file = ''
+            fs_current_file = ''
+            bp_current_file = ''
+
+            # Loading Current Transducer Calibration Data
+            [vs_current, fs_current, bp_current, vs_current_file, fs_current_file, bp_current_file] = self.loadfiles(
+                freq_data, beam_data, vs_current, fs_current, bp_current, vs_current_file, fs_current_file,
+                bp_current_file)
+
+            ### Voltage Table Creation ###
+            # collects the transducers number from the current voltsweep data
+            # if transducername == '':
+            transducername = bp_current.txdr
+            current_date = self.get_time_of_measurements(bp_current_file)
+
+
+        # goes through the beamprofile and creates a rating using cov and points 50% or great to the max value
+            bp_current_PNP = []
+            for i in bp_current.hydoutput:
+                bp_current_PNP.append(-min(i))
+
+            COV = stats.variation(bp_current_PNP)
+            Totalpower = sum(bp_current_PNP)
+            bp_current_normalized = bp_current_PNP / max(bp_current_PNP)
+            TotalPowerNormalized = sum(bp_current_normalized)
+            average_output_normalized = np.mean(bp_current_normalized)
+            # print(average_output_normalized)
+            high_pressure_75 = []
+            high_pressure_50 = []
+            low_pressure = []
+            for i in bp_current_normalized:
+                if i >= 0.75:
+                    high_pressure_75.append(i)
+                    high_pressure_50.append(i)
+                elif i >= 0.5:
+                    high_pressure_50.append(i)
+                else:
+                    low_pressure.append(i)
+
+            degrees_above_threequarters = len(high_pressure_75)
+            degrees_above_half = len(high_pressure_50)
+            average_output_above_threequarters_normalized = np.mean(high_pressure_75)
+            average_output_above_half_normalized = np.mean(high_pressure_50)
+
+        # Goes thorugh and finds the voltage values to reach the current pnp settings for the transducer
+
+            ### Voltageoutputs and PNP for the largest voltage input
+            keypressures = np.array([0.3, 1.5])  # in MPa
+            [current_voltageoutput, current_max_pnp] = self.vnoamp(keypressures, vs_current)
+
+        # Goes through and get the peak center frequency
+            sensitivity = hyd_calibration_multiple_freq(fs_current.cfreq)
+            peakfreq =-1e-6 * np.min(fs_current.hydoutput,axis=1)/sensitivity
+            indexmaxpeakfreq = np.argmax(peakfreq)
+            maxpeakfreq = fs_current.cfreq[indexmaxpeakfreq]
+
+        # Puts all the collect data in a table to be put in an excel spreadsheet
+            table_PNP = [transducername, str(current_date), current_max_pnp[0], current_max_pnp[1], maxpeakfreq, COV, degrees_above_threequarters,
+                         average_output_above_threequarters_normalized, degrees_above_half,
+                         average_output_above_half_normalized, Totalpower]
+
+            numpy_Table_PNP = np.array(table_PNP)
+            table_PNPTransducerData = pd.DataFrame(numpy_Table_PNP.reshape(1, -1), columns=list(TransducerData))
+            TransducerData = TransducerData.append(table_PNPTransducerData)
+
+        # Saves the Transducers data to the excel spreadsheet
+        # print(TransducerData)
 
         TransducerData.to_excel(excel_spreadsheet_writer, sheet_name='All Transducer Data', index=False)
         excel_spreadsheet_writer.save()
